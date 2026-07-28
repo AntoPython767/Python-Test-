@@ -1,11 +1,13 @@
 """
-cli.py — Command-line interface built on argparse.
+cli.py — Argparse-based one-shot command interface.
 
-Each subcommand maps to a single handler function.  Handlers receive
-parsed args and a TaskStore; they print output and return an exit code.
+Each subcommand maps to a single handler function.  All handlers share the
+same signature — (args, store) → int — so they can be dispatched uniformly
+from main() and called directly in tests without going through argparse.
 
-Design note: no global state — the store is injected so the handlers
-are trivially testable with a temporary store.
+Design note: no global state.  The TaskStore is constructed once in main()
+and passed down.  This makes every handler trivially testable with a
+temporary store and a fake Namespace object.
 """
 
 from __future__ import annotations
@@ -38,12 +40,14 @@ def cmd_add(args: argparse.Namespace, store: TaskStore) -> int:
 
 
 def cmd_list(args: argparse.Namespace, store: TaskStore) -> int:
-    status = Status(args.status) if args.status else None
+    # Convert raw strings back to enum values (argparse validates the choice).
+    status   = Status(args.status)     if args.status   else None
     priority = Priority(args.priority) if args.priority else None
+
     tasks = store.filter(
         status=status,
         priority=priority,
-        tag=args.tag or None,
+        tag=args.tag    or None,
         search=args.search or None,
     )
 
@@ -51,22 +55,19 @@ def cmd_list(args: argparse.Namespace, store: TaskStore) -> int:
         print(info("No tasks match your criteria."))
         return 0
 
-    # Sort: high priority first, then by created_at
+    # Sort: high priority first, then chronologically within each priority band.
     priority_order = {Priority.HIGH: 0, Priority.MEDIUM: 1, Priority.LOW: 2}
     tasks.sort(key=lambda t: (priority_order[t.priority], t.created_at))
 
+    # Build a readable filter label for the header line.
     label_parts = []
-    if status:
-        label_parts.append(f"status={status}")
-    if priority:
-        label_parts.append(f"priority={priority}")
-    if args.tag:
-        label_parts.append(f"tag={args.tag}")
-    if args.search:
-        label_parts.append(f'search="{args.search}"')
+    if status:   label_parts.append(f"status={status}")
+    if priority: label_parts.append(f"priority={priority}")
+    if args.tag:    label_parts.append(f"tag={args.tag}")
+    if args.search: label_parts.append(f'search="{args.search}"')
     label = "  ".join(label_parts) or "all"
-    print(header(f"Tasks  ({label})  —  {len(tasks)} found"))
 
+    print(header(f"Tasks  ({label})  —  {len(tasks)} found"))
     for task in tasks:
         print(task_row(task))
     print()
@@ -106,22 +107,19 @@ def cmd_update(args: argparse.Namespace, store: TaskStore) -> int:
     if task is None:
         return 1
 
+    # Only apply fields that were explicitly passed — argparse leaves
+    # unspecified optional arguments as None.
     changed = False
     if args.title:
-        task.title = args.title
-        changed = True
+        task.title = args.title;        changed = True
     if args.description is not None:
-        task.description = args.description
-        changed = True
+        task.description = args.description; changed = True
     if args.priority:
-        task.priority = Priority(args.priority)
-        changed = True
+        task.priority = Priority(args.priority); changed = True
     if args.status:
-        task.status = Status(args.status)
-        changed = True
+        task.status = Status(args.status);   changed = True
     if args.due is not None:
-        task.due_date = args.due or None
-        changed = True
+        task.due_date = args.due or None;    changed = True
     if args.tags is not None:
         task.tags = [t.strip() for t in args.tags.split(",")] if args.tags else []
         changed = True
@@ -155,8 +153,8 @@ def cmd_stats(args: argparse.Namespace, store: TaskStore) -> int:
         print(info("No tasks yet."))
         return 0
 
-    total = len(tasks)
-    by_status = {s: sum(1 for t in tasks if t.status == s) for s in Status}
+    total       = len(tasks)
+    by_status   = {s: sum(1 for t in tasks if t.status   == s) for s in Status}
     by_priority = {p: sum(1 for t in tasks if t.priority == p) for p in Priority}
 
     print(header("Task Statistics"))
@@ -172,11 +170,11 @@ def cmd_stats(args: argparse.Namespace, store: TaskStore) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Internal helper
 # ---------------------------------------------------------------------------
 
-def _resolve(task_id: str, store: TaskStore):
-    """Look up a task by ID; print an error and return None if not found."""
+def _resolve(task_id: str, store: TaskStore) -> Optional[Task]:
+    """Look up a task by ID; print a user-friendly error and return None if missing."""
     task = store.get(task_id)
     if task is None:
         print(error(f"No task with ID '{task_id}' found."))
@@ -189,7 +187,7 @@ def _resolve(task_id: str, store: TaskStore):
 # ---------------------------------------------------------------------------
 
 _PRIORITIES = [p.value for p in Priority]
-_STATUSES = [s.value for s in Status]
+_STATUSES   = [s.value for s in Status]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -223,14 +221,14 @@ Examples:
         "-p", "--priority", choices=_PRIORITIES, default="medium",
         help="Priority level (default: medium).",
     )
-    p_add.add_argument("--due", metavar="DATE", help="Due date in YYYY-MM-DD format.")
+    p_add.add_argument("--due",  metavar="DATE",     help="Due date in YYYY-MM-DD format.")
     p_add.add_argument("--tags", metavar="TAG1,TAG2", help="Comma-separated tags.")
 
     # --- list ---
     p_list = sub.add_parser("list", aliases=["ls"], help="List tasks.")
-    p_list.add_argument("-s", "--status", choices=_STATUSES, help="Filter by status.")
+    p_list.add_argument("-s", "--status",   choices=_STATUSES,   help="Filter by status.")
     p_list.add_argument("-p", "--priority", choices=_PRIORITIES, help="Filter by priority.")
-    p_list.add_argument("--tag", help="Filter by tag.")
+    p_list.add_argument("--tag",    help="Filter by tag.")
     p_list.add_argument("--search", help="Search title and description.")
 
     # --- show ---
@@ -248,11 +246,11 @@ Examples:
     # --- update ---
     p_upd = sub.add_parser("update", aliases=["edit"], help="Update task fields.")
     p_upd.add_argument("id", help="Task ID.")
-    p_upd.add_argument("--title", help="New title.")
+    p_upd.add_argument("--title",       help="New title.")
     p_upd.add_argument("--description", help="New description.")
     p_upd.add_argument("-p", "--priority", choices=_PRIORITIES, help="New priority.")
-    p_upd.add_argument("-s", "--status", choices=_STATUSES, help="New status.")
-    p_upd.add_argument("--due", metavar="DATE", help="New due date (empty string clears it).")
+    p_upd.add_argument("-s", "--status",   choices=_STATUSES,   help="New status.")
+    p_upd.add_argument("--due",  metavar="DATE",     help="New due date (empty string clears it).")
     p_upd.add_argument("--tags", metavar="TAG1,TAG2", help="New tags (empty string clears them).")
 
     # --- delete ---
@@ -270,6 +268,8 @@ Examples:
 # Entry point
 # ---------------------------------------------------------------------------
 
+# Dispatch table: command name → handler function.
+# Aliases (ls, done, edit, rm) map to the same handler as the primary name.
 COMMAND_MAP = {
     "add":      cmd_add,
     "list":     cmd_list,
@@ -287,17 +287,19 @@ COMMAND_MAP = {
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    store = TaskStore()
+    parser  = build_parser()
+    args    = parser.parse_args(argv)
+    store   = TaskStore()
     handler = COMMAND_MAP[args.command]
     try:
         return handler(args, store)
     except KeyError as exc:
+        # Raised by TaskStore when an ID is not found.
         print(error(str(exc)))
         return 1
     except ValueError as exc:
+        # Raised when an invalid enum value slips through (shouldn't happen
+        # with argparse choices=, but guards against direct API misuse).
         print(error(f"Invalid value: {exc}"))
         return 1
 
